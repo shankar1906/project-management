@@ -1,0 +1,110 @@
+'use client';
+
+import React, { useEffect } from 'react';
+import { cn } from '@/lib/utils';
+import { X } from 'lucide-react';
+
+export interface ModalProps {
+    isOpen: boolean;
+    onClose: () => void;
+    title?: string;
+    children: React.ReactNode;
+    size?: 'sm' | 'md' | 'lg' | 'xl';
+    showCloseButton?: boolean;
+    closeOnOutsideClick?: boolean;
+    showBlur?: boolean;
+}
+
+export function Modal({
+    isOpen,
+    onClose,
+    title,
+    children,
+    size = 'md',
+    showCloseButton = true,
+    closeOnOutsideClick = true,
+    showBlur = true,
+}: ModalProps) {
+    useEffect(() => {
+        if (isOpen) {
+            document.body.style.overflow = 'hidden';
+        } else {
+            document.body.style.overflow = 'unset';
+        }
+        return () => {
+            document.body.style.overflow = 'unset';
+        };
+    }, [isOpen]);
+
+    useEffect(() => {
+        function handleEscape(e: KeyboardEvent) {
+            if (e.key === 'Escape' && closeOnOutsideClick) onClose();
+        }
+        if (isOpen) {
+            document.addEventListener('keydown', handleEscape);
+            return () => document.removeEventListener('keydown', handleEscape);
+        }
+    }, [isOpen, onClose, closeOnOutsideClick]);
+
+    const sizeStyles = {
+        sm: 'max-w-md',
+        md: 'max-w-lg',
+        lg: 'max-w-2xl',
+        xl: 'max-w-4xl',
+    };
+
+    if (!isOpen) return null;
+
+    return (
+        <>
+            {/* Backdrop */}
+            <div
+                className={cn(
+                    "fixed inset-0 z-50 bg-black/50 animate-in fade-in duration-200",
+                    showBlur && "backdrop-blur-sm"
+                )}
+                onClick={() => closeOnOutsideClick && onClose()}
+            />
+
+            {/* Modal */}
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
+                <div
+                    className={cn(
+                        'w-full rounded-xl pointer-events-auto',
+                        'bg-white border border-gray-200',
+                        'shadow-2xl animate-in zoom-in-95 ease-out duration-200',
+                        sizeStyles[size]
+                    )}
+                    onClick={(e) => e.stopPropagation()}
+                >
+                    {/* Header */}
+                    {(title || showCloseButton) && (
+                        <div className="flex items-center justify-between px-5 py-3.5 border-b border-gray-200 bg-gray-50">
+                            {title && (
+                                <h2 className="text-lg font-bold text-gray-900">
+                                    {title}
+                                </h2>
+                            )}
+                            {showCloseButton && (
+                                <button
+                                    onClick={onClose}
+                                    className={cn(
+                                        'p-1.5 rounded-lg text-gray-400',
+                                        'hover:bg-gray-200 hover:text-gray-600',
+                                        'transition-colors duration-200'
+                                    )}
+                                    aria-label="Close modal"
+                                >
+                                    <X className="w-4 h-4" />
+                                </button>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Content */}
+                    <div className="p-5">{children}</div>
+                </div>
+            </div>
+        </>
+    );
+}

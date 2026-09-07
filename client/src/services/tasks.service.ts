@@ -1,0 +1,131 @@
+import { apiClient } from '@/lib/api-client';
+import type {
+    WorkflowStage,
+    Task,
+    CreateTaskPayload,
+    UpdateTaskPayload,
+    TasksResponse,
+    TaskResponse,
+    MyTasksResponse,
+    CreateStatusDto,
+    StatusResponse,
+} from '@/types/task';
+
+/**
+ * Workflow Service
+ */
+export const workflowService = {
+    /**
+     * Get workflow for a project
+     * @param projectId - Project ID
+     * @returns Workflow stages with statuses
+     */
+    async getWorkflow(projectId: string): Promise<WorkflowStage[]> {
+        const response = await apiClient.get<WorkflowStage[]>(`/projects/${projectId}/workflow`);
+        return response.data;
+    },
+
+    /**
+     * Create a new status
+     * @param projectId - Project ID
+     * @param payload - Status creation data
+     * @returns Created status
+     */
+    async createStatus(projectId: string, payload: CreateStatusDto): Promise<StatusResponse> {
+        const response = await apiClient.post<StatusResponse>(`/projects/${projectId}/statuses`, payload);
+        return response.data;
+    },
+};
+
+/**
+ * Task Service
+ */
+export const taskService = {
+    /**
+     * Get all tasks for a project
+     * @param projectId - Project ID
+     * @returns List of tasks
+     */
+    async getTasks(projectId: string): Promise<Task[]> {
+        const response = await apiClient.get<Task[]>(`/projects/${projectId}/tasks`);
+        return response.data;
+    },
+
+    /**
+     * Create a new task
+     * @param projectId - Project ID
+     * @param payload - Task creation data
+     * @returns Created task
+     */
+    async createTask(projectId: string, payload: CreateTaskPayload): Promise<TaskResponse> {
+        const response = await apiClient.post<TaskResponse>(`/projects/${projectId}/tasks`, payload);
+        return response.data;
+    },
+
+    /**
+     * Update a task
+     * @param taskId - Task ID
+     * @param payload - Task update data
+     * @returns Updated task
+     */
+    async updateTask(taskId: string, payload: UpdateTaskPayload): Promise<TaskResponse> {
+        const response = await apiClient.patch<TaskResponse>(`/tasks/${taskId}`, payload);
+        return response.data;
+    },
+
+    /**
+     * Delete a task
+     * @param taskId - Task ID
+     */
+    async deleteTask(taskId: string): Promise<void> {
+        await apiClient.delete(`/tasks/${taskId}`);
+    },
+
+    /**
+     * Assign a user to a task
+     * @param taskId - Task ID
+     * @param userId - User ID to assign
+     * @returns Updated task
+     */
+    async assignUserToTask(taskId: string, userId: string): Promise<TaskResponse> {
+        const response = await apiClient.post<TaskResponse>(`/tasks/${taskId}/assignees`, { userId });
+        return response.data;
+    },
+
+    /**
+     * Bulk assign a user to multiple tasks
+     * @param taskIds - Array of task IDs
+     * @param userId - User ID to assign
+     * @returns Result with count
+     */
+    async bulkAssignUser(taskIds: string[], userId: string): Promise<{ message: string; count: number }> {
+        const response = await apiClient.post<{ message: string; count: number }>('/tasks/bulk-assign', {
+            taskIds,
+            userId,
+        });
+        return response.data;
+    },
+
+    /**
+     * Remove a user from a task
+     * @param taskId - Task ID
+     * @param userId - User ID to remove
+     * @returns Success message
+     */
+    async removeAssignee(taskId: string, userId: string): Promise<{ message: string }> {
+        const response = await apiClient.delete<{ message: string }>(`/tasks/${taskId}/assignees/${userId}`);
+        return response.data;
+    },
+
+    /**
+     * Get my tasks (paginated)
+     * @param params - page and limit
+     * @returns Paginated list of tasks assigned to current user
+     */
+    async getMyTasks(params?: { page?: number; limit?: number }): Promise<MyTasksResponse> {
+        const { data } = await apiClient.get<MyTasksResponse>('/tasks/my-tasks', {
+            params: { page: params?.page ?? 1, limit: params?.limit ?? 20 },
+        });
+        return data;
+    },
+};

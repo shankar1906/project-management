@@ -1,0 +1,1097 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// PRISMA SCHEMA - SINGLE SOURCE OF TRUTH FOR DATABASE
+// ═══════════════════════════════════════════════════════════════════════════
+// This is the ONLY place where database models are defined
+// DO NOT duplicate schemas in any other files
+// ═══════════════════════════════════════════════════════════════════════════
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENUMS (Roles are enums, Statuses are NOT)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Organization-level role for tenant-scoped RBAC
+enum OrgRole {
+  OWNER // Full control over organization
+  ADMIN // Manages members, projects, billing
+  MEMBER // Limited access, assigned to projects
+}
+
+/// Project-level role for project-scoped RBAC
+enum ProjectRole {
+  ADMIN // Full project control
+  MEMBER // Can create/edit tasks
+  VIEWER // Read-only access
+}
+
+/// Project access level
+enum ProjectAccess {
+  PUBLIC // Visible to all org members
+  PRIVATE // Visible only to members
+}
+
+/// Phase access level (mirrors ProjectAccess)
+enum PhaseAccess {
+  PUBLIC // Visible to clients
+  PRIVATE // Visible only within org
+}
+
+/// TaskList access level (mirrors ProjectAccess)
+enum TaskListAccess {
+  PUBLIC // Visible to clients
+  PRIVATE // Visible only within org
+}
+
+/// MeetingAttachment — File attachment support (future ready)
+model MeetingAttachment {
+  id        String @id @default(cuid())
+  meetingId String
+
+  fileName     String // Original file name
+  fileUrl      String // S3/storage URL
+  mimeType     String? // e.g. "application/pdf"
+  fileSize     Int? // Bytes
+  uploadedById String? // Who uploaded
+  createdAt    DateTime @default(now())
+
+  // Relations
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@index([meetingId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// NEW ENUMS FOR TIMESHEET / ATTENDANCE
+// ═══════════════════════════════════════════════════════════════════════════
+
+enum UserPresenceStatus {
+  ONLINE
+  OFFLINE
+  LUNCH
+  BREAK
+  WFH
+  CHECKED_OUT
+}
+
+enum WorkMode {
+  OFFICE
+  WFH
+  REMOTE
+}
+
+enum BreakType {
+  LUNCH
+  BREAK
+}
+
+enum TimeStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  REJECTED
+}
+
+enum TaskType {
+  FEAT
+  BUG
+  IMPR
+  REF
+  RND
+  DOC
+  OPS
+  TEST
+  HOT
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CORE MODELS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// User - Supports multiple authentication methods
+/// Can authenticate via: Auth0 (social), Email/Password, Phone, Username
+model User {
+  id String @id @default(cuid())
+
+  // Auth0 Integration (Optional - for social logins)
+  auth0Id String? @unique // Auth0 subject ID (sub claim)
+
+  // Email Authentication
+  email         String? @unique
+  emailVerified Boolean @default(false)
+
+  // Username Authentication
+  username String? @unique // Optional username for login
+
+  // Phone Authentication
+  phone         String? @unique // E.164 format: +1234567890
+  phoneVerified Boolean @default(false)
+
+  // Password (for email/username/phone auth)
+  passwordHash      String? // Argon2id or bcrypt ≥12 rounds
+  passwordChangedAt DateTime? // Track password changes for session invalidation
+
+  // Profile
+  name      String?
+  avatarUrl String?
+
+  // 🔒 SECURITY: Account Status & Verification Gate
+  accountStatus AccountStatus @default(UNVERIFIED)
+
+  // 🔒 SECURITY: Login Attempt Tracking
+  failedLoginAttempts Int       @default(0)
+  lastFailedLoginAt   DateTime?
+  lockedUntil         DateTime? // Account lockout timestamp
+
+  // 🔒 SECURITY: Session Revocation
+  sessionsInvalidatedAt DateTime? // Invalidate all tokens before this timestamp
+
+  // 🔒 SECURITY: Account Recovery
+  hasRecoveryMethod Boolean @default(false) // At least one verified contact method
+
+  // Timestamps
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  lastLoginAt DateTime?
+
+  // Relationships
+  ownedOrganizations Organization[]
+  orgMemberships     OrgMember[]
+  projectMemberships ProjectMember[]
+  assignedTasks      TaskAssignee[]
+  statusHistory      TaskStatusHistory[]
+  otpCodes           OtpCode[]
+  refreshTokens      RefreshToken[] // For secure session management
+  auditLogs          AuditLog[] // Security audit trail
+  ownedProjects      Project[]           @relation("ProjectOwner")
+  notifications      Notification[] // Real-time notifications
+  createdMeetings    Meeting[]           @relation("MeetingCreator")
+  meetingMentions    MeetingMention[]    @relation("MeetingUserMention")
+
+  // New relations for Attendance & Timesheet
+  presenceStatus  PresenceStatus?
+  activeTimer     ActiveTimer?
+  phaseAssignees  PhaseAssignee[] // Phase assignments
+
+  @@index([auth0Id])
+  @@index([email])
+  @@index([username])
+  @@index([phone])
+  @@index([accountStatus])
+  @@index([lockedUntil])
+}
+
+/// 🔒 Account Status States - Verification Gate
+enum AccountStatus {
+  UNVERIFIED // Just signed up, needs verification
+  ACTIVE // Verified and active
+  LOCKED // Temporarily locked due to security
+  SUSPENDED // Admin suspended
+  DEACTIVATED // User deactivated
+}
+
+/// 🔒 OTP Codes - Hardened for Brute-Force Protection
+model OtpCode {
+  id         String  @id @default(cuid())
+  userId     String
+  identifier String // Email or phone (for rate limiting per identifier)
+  code       String // 6-digit code (hashed in production)
+  type       OtpType
+
+  // 🔒 SECURITY: Brute-Force Protection
+  attempts    Int     @default(0) // Failed verification attempts
+  maxAttempts Int     @default(5) // Lock after N attempts
+  isLocked    Boolean @default(false) // OTP locked due to too many attempts
+
+  // Expiration & Usage
+  expiresAt DateTime
+  isUsed    Boolean   @default(false)
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([identifier, type, createdAt]) // For rate limiting per identifier
+  @@index([code])
+  @@index([expiresAt])
+  @@index([isLocked])
+}
+
+/// OTP Code Types
+enum OtpType {
+  PHONE_VERIFY // Verify phone number
+  EMAIL_VERIFY // Verify email address
+  PASSWORD_RESET // Reset password
+  TWO_FACTOR // 2FA authentication
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TENANT (ORGANIZATION) ISOLATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Organization - Tenant boundary for multi-tenancy
+/// Every entity belongs to an organization
+/// ownerId: The user who created the org; only they can invite members and update roles
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique // URL-friendly identifier
+  ownerId   String? // Creator; only they can invite/update roles
+  isActive  Boolean  @default(true)
+  isDeleted Boolean  @default(false) // Soft delete
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relationships
+  owner           User?            @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+  members         OrgMember[]
+  projects        Project[]
+  tags            Tag[]
+  meetings        Meeting[]
+  meetingMentions MeetingMention[]
+
+  @@index([slug])
+  @@index([ownerId])
+  @@index([isDeleted])
+}
+
+/// OrgMember - Join table for User ↔ Organization with role
+/// Determines what a user can do at organization level
+/// 🔒 INVITE SYSTEM: Supports email-based invitations with secure tokens
+model OrgMember {
+  id     String  @id @default(cuid())
+  userId String? // Nullable: invite before user signup
+  orgId  String
+  role   OrgRole @default(MEMBER)
+
+  // 🔒 INVITE FLOW: Email-based invitations
+  email       String? // For pre-registration invites
+  inviteToken String?      @unique // Secure single-use token
+  expiresAt   DateTime? // Invite expiry timestamp
+  status      MemberStatus @default(INVITED) // INVITED → ACTIVE/REJECTED
+
+  // 🔒 OPTIONAL PROJECT AUTO-ASSIGNMENT: Store project assignment until acceptance
+  inviteProjectId   String? // Auto-assign to this project on accept
+  inviteProjectRole ProjectRole? // Role within that project
+
+  joinedAt       DateTime  @default(now())
+  isActive       Boolean   @default(true)
+  lastAccessedAt DateTime? // Last time user accessed this org
+
+  // Relationships
+  user User?        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  org  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, orgId]) // User can belong to org only once
+  @@unique([email, orgId]) // Email can be invited to org only once
+  @@index([userId])
+  @@index([orgId])
+  @@index([role])
+  @@index([inviteToken])
+  @@index([status])
+  @@index([expiresAt])
+}
+
+/// 🔒 Member Status - Invite Lifecycle States
+enum MemberStatus {
+  INVITED // Invitation sent, awaiting acceptance
+  ACTIVE // Member accepted and active
+  REJECTED // User rejected the invitation
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+enum ProjectStatus {
+  NOT_STARTED
+  PLANNING
+  IN_PROGRESS
+  REVIEW
+  TESTING
+  ON_HOLD
+  BLOCKED
+  COMPLETED
+  CANCELLED
+  ARCHIVED
+}
+
+// PROJECT MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Project - Contains tasks and workflow
+/// Always belongs to an organization (tenant-scoped)
+model Project {
+  id          String        @id @default(cuid())
+  orgId       String // Tenant isolation
+  name        String
+  description String?
+  color       String? // Hex color for UI
+  startDate   DateTime?
+  endDate     DateTime?
+  access      ProjectAccess @default(PRIVATE)
+  status      ProjectStatus @default(NOT_STARTED)
+  projectId   String // Human-readable ID (e.g. PR-1)
+  ownerId     String?
+  isArchived  Boolean       @default(false)
+  isDeleted   Boolean       @default(false) // Soft delete
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  // Relationships
+  org             Organization     @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  owner           User?            @relation("ProjectOwner", fields: [ownerId], references: [id])
+  members         ProjectMember[]
+  phases          Phase[]
+  taskLists       TaskList[]
+  stages          TaskStage[]
+  statuses        TaskStatus[]
+  tasks           Task[]
+  tags            ProjectTag[]
+  meetings        Meeting[]
+  meetingMentions MeetingMention[]
+
+  @@unique([orgId, projectId]) // projectId must be unique within org
+  @@index([orgId])
+  @@index([ownerId])
+  @@index([isArchived])
+  @@index([isDeleted])
+}
+
+/// ProjectMember - Join table for User ↔ Project with role
+/// Determines what a user can do within a project
+model ProjectMember {
+  id        String      @id @default(cuid())
+  projectId String
+  userId    String
+  role      ProjectRole @default(MEMBER)
+  joinedAt  DateTime    @default(now())
+  isActive  Boolean     @default(true)
+
+  // Relationships
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId]) // User can belong to project only once
+  @@index([projectId])
+  @@index([userId])
+  @@index([role])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WORKFLOW (DATA-DRIVEN, NOT ENUM-BASED)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// TaskStage - Grouping for statuses (columns in Kanban)
+/// Example: "To Do", "In Progress", "Done"
+model TaskStage {
+  id        String   @id @default(cuid())
+  projectId String
+  name      String
+  order     Int // Display order
+  color     String?
+  isDeleted Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relationships
+  project  Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  statuses TaskStatus[]
+
+  @@index([projectId])
+  @@index([order])
+}
+
+/// TaskStatus - Workflow status (cards within stages)
+/// Example: "Not Started", "Working On It", "Stuck", "Completed"
+/// This is DATA-DRIVEN, not an enum - can be customized per project
+model TaskStatus {
+  id        String   @id @default(cuid())
+  projectId String
+  stageId   String
+  name      String
+  order     Int // Display order within stage
+  color     String?
+  isDefault Boolean  @default(false) // Default status for new tasks
+  isDeleted Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relationships
+  project Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  stage   TaskStage           @relation(fields: [stageId], references: [id], onDelete: Cascade)
+  tasks   Task[]
+  history TaskStatusHistory[]
+
+  @@index([projectId])
+  @@index([stageId])
+  @@index([order])
+  @@index([isDefault])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASES & TASKLISTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Phase - Time-bounded milestone segment of a project
+/// Example: "Requirement Gathering", "UI Design", "Development", "Testing"
+model Phase {
+  id        String @id @default(cuid())
+  orgId     String // Tenant isolation
+  projectId String
+
+  name                 String
+  ownerId              String?
+  startDate            DateTime?
+  endDate              DateTime?
+  status               String?  // e.g. NOT_STARTED, IN_PROGRESS, COMPLETED
+  completionPercentage Int      @default(0)
+
+  access     PhaseAccess @default(PRIVATE) // Replaces "flag"
+  orderIndex Int         @default(0)
+
+  isDeleted Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relationships
+  project   Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  taskLists TaskList[]
+  tasks     Task[]
+  tags      PhaseTag[]     // Phase ↔ Tag join
+  assignees PhaseAssignee[] // Phase ↔ User join
+
+  @@index([orgId])
+  @@index([projectId])
+  @@index([ownerId])
+  @@index([isDeleted])
+  @@index([orderIndex])
+}
+
+/// TaskList - Bucket of tasks inside a phase
+/// Example inside Development phase: "Backend Tasks", "Frontend Tasks", "API Integration"
+model TaskList {
+  id        String  @id @default(cuid())
+  orgId     String // Tenant isolation
+  projectId String
+  phaseId   String?
+
+  name       String
+  access     TaskListAccess @default(PRIVATE) // Replaces "flag"
+  orderIndex Int            @default(0)
+
+  isDeleted Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relationships
+  project Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  phase   Phase?       @relation(fields: [phaseId], references: [id], onDelete: SetNull)
+  tasks   Task[]
+  tags    TaskListTag[] // TaskList ↔ Tag join
+
+  @@index([orgId])
+  @@index([projectId])
+  @@index([phaseId])
+  @@index([isDeleted])
+  @@index([orderIndex])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TASKS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Task - Core work item
+/// Supports subtasks via self-relation
+/// Every task belongs to a TaskList; phaseId is denormalized for fast queries
+model Task {
+  id                   String    @id @default(cuid())
+  projectId            String
+  statusId             String
+  phaseId              String?   // Denormalized from TaskList for fast filtering
+  taskListId           String?   // Nullable for backward compat; required for new tasks
+  parentId             String?   // Null = top-level task
+
+  taskId               String?   // Formatted ID: PRO-TYPE-00001 (e.g. PR-1-BUG-00001)
+  type                 TaskType?
+
+  title                String
+  description          String?
+  priority             Int       @default(0) // Higher = more important
+  order                Int       // Display order
+  dueDate              DateTime?
+  startDate            DateTime? // Optional start date
+  completionPercentage Int       @default(0) // 0-100
+  isDeleted            Boolean   @default(false)
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  // Relationships
+  project       Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  status        TaskStatus          @relation(fields: [statusId], references: [id], onDelete: Restrict)
+  phase         Phase?              @relation(fields: [phaseId], references: [id], onDelete: SetNull)
+  taskList      TaskList?           @relation(fields: [taskListId], references: [id], onDelete: Cascade)
+  parent        Task?               @relation("TaskSubtasks", fields: [parentId], references: [id], onDelete: Cascade)
+  subtasks      Task[]              @relation("TaskSubtasks")
+  assignees     TaskAssignee[]
+  tags          TaskTag[]
+  statusHistory TaskStatusHistory[]
+  activeTimers  ActiveTimer[]
+  dueReminders  TaskDueReminder[]
+
+  @@index([projectId])
+  @@index([statusId])
+  @@index([phaseId])
+  @@index([taskListId])
+  @@index([parentId])
+  @@index([taskId])
+  @@index([type])
+  @@index([priority])
+  @@index([order])
+  @@index([dueDate])
+}
+
+/// TaskAssignee - Join table for Task ↔ User
+/// Tasks can have multiple assignees
+model TaskAssignee {
+  id         String   @id @default(cuid())
+  taskId     String
+  userId     String
+  assignedAt DateTime @default(now())
+
+  // Relationships
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, userId]) // User can be assigned to task only once
+  @@index([taskId])
+  @@index([userId])
+}
+
+/// TaskStatusHistory - Audit trail for status changes
+model TaskStatusHistory {
+  id        String   @id @default(cuid())
+  taskId    String
+  statusId  String
+  userId    String // Who changed the status
+  changedAt DateTime @default(now())
+
+  // Relationships
+  task   Task       @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  status TaskStatus @relation(fields: [statusId], references: [id], onDelete: Restrict)
+  user   User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([taskId])
+  @@index([statusId])
+  @@index([userId])
+  @@index([changedAt])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TASK DUE REMINDERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// TaskDueReminder - Tracks sent reminders to prevent duplicates
+/// Ensures each reminder type is sent only once per task
+/// Supports idempotent cron execution
+model TaskDueReminder {
+  id           String       @id @default(cuid())
+  taskId       String
+  reminderType ReminderType
+  sentAt       DateTime? // Null = queued, DateTime = delivered
+  createdAt    DateTime     @default(now())
+
+  // Relationships
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, reminderType]) // Prevents duplicate reminders
+  @@index([taskId])
+  @@index([reminderType])
+  @@index([sentAt])
+  @@index([createdAt])
+}
+
+/// Reminder Types - When to send task due reminders
+enum ReminderType {
+  BEFORE_3_DAYS // 3 days before due date
+  BEFORE_2_DAYS // 2 days before due date
+  BEFORE_24_HOURS // 24 hours before due date
+  ON_DUE_DATE // On the due date itself
+  OVERDUE // After due date has passed
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE TAGS & ASSIGNEES
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// PhaseTag - Join table for Phase ↔ Tag
+model PhaseTag {
+  id      String @id @default(cuid())
+  phaseId String
+  tagId   String
+
+  phase Phase @relation(fields: [phaseId], references: [id], onDelete: Cascade)
+  tag   Tag   @relation(fields: [tagId],   references: [id], onDelete: Cascade)
+
+  @@unique([phaseId, tagId])
+  @@index([phaseId])
+  @@index([tagId])
+}
+
+/// PhaseAssignee - Join table for Phase ↔ User
+model PhaseAssignee {
+  id      String @id @default(cuid())
+  phaseId String
+  userId  String
+
+  phase Phase @relation(fields: [phaseId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId],  references: [id], onDelete: Cascade)
+
+  @@unique([phaseId, userId])
+  @@index([phaseId])
+  @@index([userId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TASKLIST TAGS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// TaskListTag - Join table for TaskList ↔ Tag
+model TaskListTag {
+  id         String @id @default(cuid())
+  taskListId String
+  tagId      String
+
+  taskList TaskList @relation(fields: [taskListId], references: [id], onDelete: Cascade)
+  tag      Tag      @relation(fields: [tagId],      references: [id], onDelete: Cascade)
+
+  @@unique([taskListId, tagId])
+  @@index([taskListId])
+  @@index([tagId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TAGS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Tag - Organization-scoped labels for tasks
+model Tag {
+  id        String   @id @default(cuid())
+  orgId     String
+  name      String
+  color     String?
+  isDeleted Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relationships
+  org           Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  tasks         TaskTag[]
+  projects      ProjectTag[]
+  phases        PhaseTag[]    // Phase ↔ Tag
+  taskLists     TaskListTag[] // TaskList ↔ Tag
+
+  @@unique([orgId, name]) // Tag names must be unique within org
+  @@index([orgId])
+}
+
+/// TaskTag - Join table for Task ↔ Tag
+model TaskTag {
+  id     String @id @default(cuid())
+  taskId String
+  tagId  String
+
+  // Relationships
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  tag  Tag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, tagId]) // Task can have tag only once
+  @@index([taskId])
+  @@index([tagId])
+}
+
+/// ProjectTag - Join table for Project ↔ Tag
+model ProjectTag {
+  id        String @id @default(cuid())
+  projectId String
+  tagId     String
+
+  // Relationships
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tag     Tag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, tagId])
+  @@index([projectId])
+  @@index([tagId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECURITY: REFRESH TOKENS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 🔒 Refresh Tokens - For secure session management
+/// Access tokens are short-lived (15min), refresh tokens are long-lived (7 days)
+model RefreshToken {
+  id         String    @id @default(cuid())
+  userId     String
+  token      String    @unique // Hashed refresh token
+  expiresAt  DateTime
+  isRevoked  Boolean   @default(false)
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime  @default(now())
+
+  // Device/Session tracking
+  userAgent String?
+  ipAddress String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+  @@index([expiresAt])
+  @@index([isRevoked])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECURITY: AUDIT LOGS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 🔒 Audit Log - Security event tracking
+model AuditLog {
+  id         String      @id @default(cuid())
+  userId     String? // Null for failed login attempts
+  action     AuditAction
+  resource   String? // e.g., "User", "Organization"
+  resourceId String?
+  metadata   Json? // Additional context
+  ipAddress  String?
+  userAgent  String?
+  success    Boolean     @default(true)
+  createdAt  DateTime    @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+  @@index([success])
+}
+
+/// Audit Action Types
+enum AuditAction {
+  LOGIN
+  LOGOUT
+  SIGNUP
+  PASSWORD_CHANGE
+  PASSWORD_RESET
+  EMAIL_VERIFY
+  PHONE_VERIFY
+  ORG_SWITCH
+  ACCOUNT_LOCKED
+  ACCOUNT_UNLOCKED
+  SESSION_REVOKED
+  OTP_FAILED
+  OTP_LOCKED
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// REAL-TIME NOTIFICATIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 🔔 Notification - Real-time user notifications
+model Notification {
+  id             String           @id @default(cuid())
+  userId         String
+  type           NotificationType
+  message        String
+  organizationId String? // Context: which org this relates to
+  metadata       Json? // Additional context (inviteToken, etc.)
+  readAt         DateTime? // Null = unread
+  createdAt      DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([type])
+  @@index([createdAt])
+  @@index([readAt])
+}
+
+/// Notification Types
+enum NotificationType {
+  INVITE_RECEIVED // You've been invited to an organization
+  INVITE_ACCEPTED // Your invitation was accepted
+  INVITE_REJECTED // Your invitation was rejected
+  INVITE_EXPIRED // Invitation has expired
+  TASK_ASSIGNED // You have been assigned to a task
+  TASK_COMPLETED // A task assigned to you has been completed
+  MOM_MENTIONED // You were @mentioned in a MOM
+  MOM_PROJECT_MENTIONED // A project you belong to was #mentioned in a MOM
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MINUTES OF MEETING (MOM)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// MeetingMentionType — What entity is mentioned in a MOM
+enum MeetingMentionType {
+  USER
+  PROJECT
+}
+
+/// MeetingStatus — Draft vs Published
+enum MeetingStatus {
+  DRAFT
+  PUBLISHED
+}
+
+/// Meeting — MOM main record (tenant-scoped)
+model Meeting {
+  id          String @id @default(cuid())
+  orgId       String // Tenant isolation
+  createdById String // Who created the MOM
+
+  // Optional: meeting created inside a project screen
+  projectId String? // Project-scoped meetings
+
+  // Header fields (from UI)
+  title          String // Meeting title
+  location       String? // "Showcase Room", "Zoom"
+  numberOfPeople Int? // Attendee count
+  time           String? // "10:30 AM"
+  purpose        String? // Purpose of meeting
+  attendedBy     String? // Free text
+  absentees      String? // Free text
+
+  // Rich-text discussion area
+  content   Json // TipTap JSON document
+  plainText String? // Plain-text for search
+
+  // Meeting date
+  meetingDate DateTime
+
+  // Meta
+  status MeetingStatus @default(DRAFT)
+
+  // Soft delete (enterprise)
+  isDeleted   Boolean   @default(false)
+  deletedAt   DateTime?
+  deletedById String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  org         Organization        @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  createdBy   User                @relation("MeetingCreator", fields: [createdById], references: [id])
+  project     Project?            @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  mentions    MeetingMention[]
+  attachments MeetingAttachment[]
+
+  @@index([orgId])
+  @@index([createdById])
+  @@index([projectId])
+  @@index([meetingDate])
+  @@index([status])
+  @@index([isDeleted])
+}
+
+/// MeetingMention — Extracted mention record
+/// Used for project screen backlinks + user mention notifications
+model MeetingMention {
+  id        String @id @default(cuid())
+  meetingId String
+  orgId     String // Denormalized for fast org-scoped queries
+
+  type MeetingMentionType
+
+  userId    String? // Non-null when type = USER
+  projectId String? // Non-null when type = PROJECT
+
+  // TipTap JSON is tree-based → store path, not character offset
+  // Example: ["doc", 0, "paragraph", 2, "mention", 0]
+  positionPath Json?
+
+  createdAt DateTime @default(now())
+
+  // Relations
+  meeting Meeting      @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  user    User?        @relation("MeetingUserMention", fields: [userId], references: [id], onDelete: Cascade)
+  project Project?     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  org     Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([meetingId, type, userId, projectId]) // Prevent duplicate mentions
+  @@index([meetingId])
+  @@index([orgId, type])
+  @@index([orgId, projectId])
+  @@index([orgId, userId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PRESENCE & ATTENDANCE
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// PresenceStatus - Global per-user presence state (Online, WFH, etc.)
+model PresenceStatus {
+  userId    String             @id
+  status    UserPresenceStatus
+  message   String?
+  updatedAt DateTime           @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+/// AttendanceSession - Organization-specific daily check-in
+model AttendanceSession {
+  id String @id @default(cuid())
+
+  userId String
+  orgId  String
+
+  checkIn  DateTime
+  checkOut DateTime?
+
+  workMode     WorkMode
+  totalMinutes Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([orgId])
+}
+
+/// AttendanceBreak - Breaks within a specific attendance session
+model AttendanceBreak {
+  id        String @id @default(cuid())
+  sessionId String
+
+  type      BreakType
+  startTime DateTime
+  endTime   DateTime?
+
+  @@index([sessionId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TIME TRACKING & TIMESHEETS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// ActiveTimer - Global active timer (only ONE per user globally)
+model ActiveTimer {
+  id     String @id @default(cuid())
+  userId String @unique
+
+  orgId      String
+  projectId  String?
+  phaseId    String?
+  taskListId String?
+  taskId     String?
+
+  startedAt DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  task Task? @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  @@index([orgId])
+  @@index([taskId])
+}
+
+/// TimeEntry - Discrete time log against a task (snapshot phase/tasklist)
+model TimeEntry {
+  id String @id @default(cuid())
+
+  orgId      String
+  projectId  String
+  phaseId    String?
+  taskListId String?
+  taskId     String
+  userId     String
+
+  date            DateTime
+  durationMinutes Int
+
+  description String?
+  billable    Boolean    @default(true)
+  status      TimeStatus @default(DRAFT)
+
+  startTime DateTime?
+  endTime   DateTime?
+
+  hourlyRateSnapshot Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orgId])
+  @@index([projectId])
+  @@index([phaseId])
+  @@index([taskListId])
+  @@index([taskId])
+  @@index([userId])
+  @@index([date])
+}
+
+/// WeeklyTimesheet - Per-organization weekly aggregation
+model WeeklyTimesheet {
+  id String @id @default(cuid())
+
+  orgId  String
+  userId String
+
+  weekStart DateTime
+  weekEnd   DateTime
+
+  totalMinutes Int @default(0)
+
+  status TimeStatus @default(DRAFT)
+
+  submittedAt     DateTime?
+  approvedAt      DateTime?
+  approvedBy      String?
+  rejectionReason String?
+
+  @@unique([orgId, userId, weekStart])
+  @@index([orgId])
+  @@index([userId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ORGANIZATION SETTINGS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// OrgSettings - Per-organization configuration flags
+/// One row per organization. Auto-created with defaults on first access.
+model OrgSettings {
+  orgId String @id // 1-to-1 with Organization
+
+  // Attendance
+  requireAttendance Boolean @default(false) // Require check-in before work
+
+  // Timer
+  requireCheckInForTimer Boolean @default(false) // Must check-in before starting timer
+  allowManualTimeEntry   Boolean @default(true)  // Allow manually logging time
+  allowMultipleTimers    Boolean @default(false) // Allow multiple active timers per user
+
+  // Timesheets
+  requireTimesheetApproval  Boolean @default(true)  // Timesheet must be approved by manager
+  lockTimesheetAfterApproval Boolean @default(true) // Prevent edits after approval
+  autoSubmitTimesheet        Boolean @default(false) // Auto-submit weekly timesheet
+
+  // User presence
+  enableUserPresence Boolean @default(true) // Show online/offline status
+
+  // RBAC
+  enforceProjectRoleStrict Boolean @default(true) // Strict project role enforcement
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orgId])
+}

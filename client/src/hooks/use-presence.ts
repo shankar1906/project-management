@@ -1,0 +1,108 @@
+/**
+ * Presence WebSocket. Connect only when orgSettings.enableUserPresence === true.
+ * On org switch: disconnect (called from useSwitchOrg). Reconnect with new org in same hook when enabled.
+ */
+
+'use client';
+
+import { useEffect, useRef } from 'react';
+import { io, Socket } from 'socket.io-client';
+import { API_CONFIG } from '@/lib/config';
+import { tokenStorage } from '@/lib/token-storage';
+import { useOrgStore } from '@/stores/orgStore';
+import { usePresenceStore, type UserPresenceStatus } from '@/stores/presenceStore';
+import { useAttendanceStore } from '@/stores/attendanceStore';
+import { useUser } from '@/hooks/use-auth';
+import { useOrgSettings } from '@/hooks/use-org-settings';
+import { setPresenceSocket, disconnectPresenceSocket } from '@/lib/presence-socket';
+
+export { disconnectPresenceSocket } from '@/lib/presence-socket';
+
+export function usePresence() {
+    const activeOrgId = useOrgStore((s) => s.activeOrgId);
+    const { data: orgSettings } = useOrgSettings();
+    const { data: backendUser } = useUser();
+    const attendanceStatus = useAttendanceStore((s) => s.status);
+    const { setPresence, setAllPresences, clearPresence } = usePresenceStore();
+    const presences = usePresenceStore((s) => s.presences);
+    const enabled = !!activeOrgId && !!orgSettings?.enableUserPresence;
+    const connectedOrgRef = useRef<string | null>(null);
+
+    // Synchronize current user's local attendance status to presence store instantly
+    useEffect(() => {
+        if (!backendUser?.id) return;
+
+        let mappedStatus: UserPresenceStatus | null = null;
+        if (attendanceStatus === 'checked_in') mappedStatus = 'ONLINE';
+        else if (attendanceStatus === 'on_break') mappedStatus = 'BREAK';
+        else if (attendanceStatus === 'on_lunch') mappedStatus = 'LUNCH';
+        else if (attendanceStatus === 'checked_out' || attendanceStatus === 'not_checked_in') mappedStatus = 'OFFLINE';
+
+        if (mappedStatus && presences[backendUser.id]?.status !== mappedStatus) {
+            setPresence(backendUser.id, {
+                ...presences[backendUser.id],
+                status: mappedStatus as any,
+                updatedAt: new Date().toISOString()
+            });
+        }
+    }, [backendUser?.id, attendanceStatus, setPresence, presences]);
+
+    useEffect(() => {
+        if (!enabled) {
+            disconnectPresenceSocket();
+            connectedOrgRef.current = null;
+            return;
+        }
+        if (connectedOrgRef.current === activeOrgId) return;
+
+        disconnectPresenceSocket();
+        connectedOrgRef.current = activeOrgId ?? null;
+
+        const baseUrl = (API_CONFIG.BASE_URL || '').replace(/\/api\/?$/, '');
+        const namespace = API_CONFIG.WEBSOCKET?.PRESENCE_NAMESPACE ?? '/presence';
+        const socketUrl = `${baseUrl}${namespace}`;
+        const token = tokenStorage.getToken(API_CONFIG.STORAGE.ACCESS_TOKEN);
+
+        const socket = io(socketUrl, {
+            path: '/socket.io/',
+            transports: ['websocket', 'polling'],
+            auth: { token, orgId: activeOrgId },
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 5000,
+            reconnectionAttempts: 5,
+        });
+
+        socket.on('connect', () => {
+            // console.log('Presence socket connected');
+        });
+
+        // Listen for batch list update (if backend sends it)
+        socket.on('presence:list', (data: Record<string, any>) => {
+            setAllPresences(data);
+        });
+
+        // Listen for individual updates
+        socket.on('presence_updated', (data: { userId: string; status: string; message?: string; updatedAt?: string }) => {
+            const { userId, status, message, updatedAt } = data;
+            setPresence(userId, {
+                status: status as any,
+                message,
+                updatedAt,
+            });
+        });
+
+        socket.on('disconnect', () => {
+            clearPresence();
+        });
+
+        setPresenceSocket(socket);
+        return () => {
+            socket.disconnect();
+            setPresenceSocket(null);
+            connectedOrgRef.current = null;
+        };
+    }, [enabled, activeOrgId, setPresence, setAllPresences, clearPresence]);
+
+    return presences;
+}
+
