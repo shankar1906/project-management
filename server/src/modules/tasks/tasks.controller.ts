@@ -85,6 +85,20 @@ export class TasksController {
   }
 
   /**
+   * GET /tasks/user/:userId
+   * - Lists all tasks assigned to a specific user across all projects in the org
+   */
+  @Get('tasks/user/:userId')
+  async findUserTasks(
+    @Param('userId') targetUserId: string,
+    @OrgId() orgId: string,
+    @Query() query: MyTasksQueryDto,
+  ) {
+    this.logger.log(`Fetching tasks for user ${targetUserId}`);
+    return this.tasksService.findMyTasks(targetUserId, orgId, query);
+  }
+
+  /**
    * PATCH /tasks/:id/status
    * - Updates task status
    * - Records status change in history

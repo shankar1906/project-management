@@ -271,21 +271,40 @@ export class TasksService {
    * - Returns detailed task data including projectName, dueDate, status, assignees, tags
    * - Paginated
    */
-  async findMyTasks(userId: string, orgId: string, dto: { page?: number; limit?: number }) {
+  async findMyTasks(userId: string, orgId: string, dto: { page?: number; limit?: number; search?: string; statusId?: string; projectId?: string }) {
     const page = dto.page ?? 1;
-    const limit = Math.min(dto.limit ?? 20, 50);
+    const limit = Math.min(dto.limit ?? 50, 100);
     const skip = (page - 1) * limit;
 
-    const where = {
+    const where: any = {
       assignees: {
         some: { userId },
       },
       project: {
-        // orgId,
         isDeleted: false,
+        ...(dto.projectId ? { id: dto.projectId } : {}),
       },
       isDeleted: false,
+      ...(dto.statusId ? { statusId: dto.statusId } : {}),
     };
+
+    if (dto.search && dto.search.trim()) {
+      const searchStr = dto.search.trim();
+      where.AND = [
+        {
+          OR: [
+            { title: { contains: searchStr, mode: 'insensitive' } },
+            { description: { contains: searchStr, mode: 'insensitive' } },
+            { taskId: { contains: searchStr, mode: 'insensitive' } },
+            { project: { name: { contains: searchStr, mode: 'insensitive' } } },
+            { status: { name: { contains: searchStr, mode: 'insensitive' } } },
+            { type: { contains: searchStr, mode: 'insensitive' } },
+            { assignees: { some: { user: { name: { contains: searchStr, mode: 'insensitive' } } } } },
+            { tags: { some: { tag: { name: { contains: searchStr, mode: 'insensitive' } } } } },
+          ],
+        },
+      ];
+    }
 
     const [total, tasks] = await this.prisma.$transaction([
       this.prisma.task.count({ where }),
@@ -312,11 +331,25 @@ export class TasksService {
           updatedAt: true,
           parentId: true,
           projectId: true,
+          phaseId: true,
+          taskListId: true,
           project: {
             select: {
               id: true,
               name: true,
               color: true,
+            },
+          },
+          phase: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
+          taskList: {
+            select: {
+              id: true,
+              name: true,
             },
           },
           status: {
@@ -377,6 +410,10 @@ export class TasksService {
       projectId: task.projectId,
       projectName: task.project.name,
       projectColor: task.project.color,
+      phaseId: task.phaseId,
+      phaseName: task.phase?.name || null,
+      taskListId: task.taskListId,
+      taskListName: task.taskList?.name || null,
       status: {
         id: task.status.id,
         name: task.status.name,

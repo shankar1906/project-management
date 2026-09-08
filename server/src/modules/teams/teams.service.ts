@@ -92,6 +92,37 @@ export class TeamsService {
       },
     });
 
+    // Fetch working/in-progress assigned task for each member in case no timer is running
+    const memberUserIds = members.filter((m) => m.user).map((m) => m.user!.id);
+    const assignedTasks = await this.prisma.taskAssignee.findMany({
+      where: {
+        userId: { in: memberUserIds },
+        task: {
+          isDeleted: false,
+          status: {
+            name: {
+              notIn: ['Not Started', 'not started', 'NOT STARTED', 'Completed', 'Completed', 'Done', 'Closed'],
+            },
+          },
+        },
+      },
+      orderBy: [
+        { task: { updatedAt: 'desc' } },
+        { assignedAt: 'desc' },
+      ],
+      select: {
+        userId: true,
+        task: {
+          select: {
+            id: true,
+            title: true,
+            project: { select: { name: true } },
+            status: { select: { name: true, color: true } },
+          },
+        },
+      },
+    });
+
     const taskMap = new Map(tasks.map((t) => [t.id, t]));
     const timerMap = new Map(activeTimers.map((t) => [t.userId, t]));
 
@@ -164,12 +195,29 @@ export class TeamsService {
 
         const activeTimer = timerMap.get(m.user!.id);
         const activeTask = activeTimer?.taskId ? taskMap.get(activeTimer.taskId) : null;
+        const userAssignedTasks = assignedTasks.filter((at) => at.userId === m.user!.id);
+        const workingTask = userAssignedTasks.length > 0 ? userAssignedTasks[0].task : null;
+
         const timerInfo = activeTimer ? {
             id: activeTimer.id,
             startedAt: activeTimer.startedAt,
             taskTitle: activeTask?.title ?? null,
             projectName: activeTask?.project?.name ?? null,
         } : null;
+
+        const currentTaskInfo = activeTimer && activeTask ? {
+            taskTitle: activeTask.title,
+            projectName: activeTask.project?.name || null,
+            statusName: 'Working on it',
+            statusColor: '#10b981',
+            isTimerRunning: true,
+        } : (workingTask ? {
+            taskTitle: workingTask.title,
+            projectName: workingTask.project?.name || null,
+            statusName: workingTask.status?.name || 'Working on it',
+            statusColor: workingTask.status?.color || '#10b981',
+            isTimerRunning: false,
+        } : null);
 
         return {
           memberId: m.id,
@@ -187,6 +235,7 @@ export class TeamsService {
           presence: settings.enableUserPresence ? (m.user as any).presenceStatus : null,
           attendance: attendanceInfo,
           activeTimer: timerInfo,
+          currentTask: currentTaskInfo,
         };
       });
   }

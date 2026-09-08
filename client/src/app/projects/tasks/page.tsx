@@ -13,6 +13,10 @@ import { List as ListIcon, Search, MoreVertical, ChevronDown } from 'lucide-reac
 import { Button } from '@/components/ui/Button';
 import { Loader } from '@/components/ui/Loader';
 import { useMyTasks, useUpdateTask, useProjectWorkflow } from '@/hooks/use-tasks';
+import { useStructuredPhases } from '@/hooks/use-phases';
+import { useProjectMembers } from '@/hooks/use-projects';
+import { taskService } from '@/services/tasks.service';
+import { TaskViewModal } from '@/components/tasks/TaskViewModal';
 import { useToast } from '@/components/ui/Toast';
 import { cn } from '@/lib/utils';
 import type { MyTask, MyTaskTag } from '@/types/task';
@@ -99,10 +103,59 @@ function StatusDropdown({ taskId, projectId, currentStatus }: { taskId: string, 
     );
 }
 
+function TaskModalWrapper({
+    isOpen,
+    onClose,
+    projectId,
+    taskId,
+    onTaskUpdated,
+    onTaskDeleted,
+}: {
+    isOpen: boolean;
+    onClose: () => void;
+    projectId: string;
+    taskId: string;
+    onTaskUpdated: () => void;
+    onTaskDeleted: () => void;
+}) {
+    const { data: phases = [] } = useStructuredPhases(projectId);
+    const { data: workflow = [] } = useProjectWorkflow(projectId);
+    const { data: members = [] } = useProjectMembers(projectId);
+
+    return (
+        <TaskViewModal
+            isOpen={isOpen}
+            onClose={onClose}
+            projectId={projectId}
+            phases={phases}
+            selectedTaskId={taskId}
+            workflow={workflow}
+            members={members}
+            onUpdateTask={async (tId, data) => {
+                await taskService.updateTask(tId, data);
+            }}
+            onDeleteTask={async (tId) => {
+                await taskService.deleteTask(tId);
+            }}
+            onTaskUpdated={onTaskUpdated}
+            onTaskDeleted={onTaskDeleted}
+        />
+    );
+}
+
 export default function TasksPage() {
     const [searchQuery, setSearchQuery] = useState('');
     const [page, setPage] = useState(1);
     const [limit, setLimit] = useState(20);
+    const [taskModalState, setTaskModalState] = useState<{
+        isOpen: boolean;
+        taskId: string | null;
+        projectId: string | null;
+    }>({
+        isOpen: false,
+        taskId: null,
+        projectId: null,
+    });
 
     const { data: tasksData, isLoading, error, refetch } = useMyTasks({ page, limit });
     const tasks = tasksData?.data || [];
@@ -122,17 +175,29 @@ export default function TasksPage() {
 
     // Cell Renderers
     const TaskNameRenderer = (props: ICellRendererParams) => {
-        const { title, projectName, projectColor, projectId, id } = props.data as MyTask;
+        const { title, projectName, projectColor, projectId, id, status } = props.data as MyTask;
         const initial = title?.charAt(0) || 'T';
+        const fullTooltip = `${title}${projectName ? ` - ${projectName}` : ''}${status?.name ? ` - ${status.name}` : ''}`;
 
-        const handleClick = () => {
+        const handleTaskClick = (e: React.MouseEvent) => {
+            e.stopPropagation();
+            setTaskModalState({
+                isOpen: true,
+                taskId: id,
+                projectId: projectId,
+            });
+        };
+
+        const handleProjectClick = (e: React.MouseEvent) => {
+            e.stopPropagation();
             router.push(`/projects/${projectId}`);
         };
 
         return (
             <div
                 className="flex items-center gap-3 group cursor-pointer w-full overflow-hidden"
-                onClick={handleClick}
+                onClick={handleTaskClick}
+                title={fullTooltip}
             >
                 <div
                     className="w-8 h-8 rounded-md shadow-sm flex items-center justify-center text-white font-bold text-xs flex-shrink-0 transition-transform group-hover:scale-105"
@@ -147,11 +212,15 @@ export default function TasksPage() {
                     <div className="flex items-center gap-1.5 w-full">
                         <span
                             className="font-semibold text-gray-900 group-hover:text-blue-600 transition-colors truncate text-xs block"
-                            title={title}
+                            title={fullTooltip}
                         >
                             {title}
                         </span>
-                        <span className="flex-shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-tight border bg-gray-50 text-gray-500 border-gray-100">
+                        <span
+                            onClick={handleProjectClick}
+                            className="flex-shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-tight border bg-gray-50 text-gray-500 border-gray-100 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200 transition-colors cursor-pointer"
+                            title={`Go to project: ${projectName}`}
+                        >
                             {projectName}
                         </span>
                     </div>
@@ -167,10 +236,13 @@ export default function TasksPage() {
         return (
             <div
                 className="flex items-center gap-2 cursor-pointer group"
-                onClick={() => router.push(`/projects/${projectId}`)}
+                onClick={(e) => {
+                    e.stopPropagation();
+                    router.push(`/projects/${projectId}`);
+                }}
             >
                 <div
-                    className="w-7 h-7 rounded-md flex items-center justify-center text-white font-bold text-[10px] flex-shrink-0"
+                    className="w-7 h-7 rounded-md flex items-center justify-center text-white font-bold text-[10px] flex-shrink-0 transition-transform group-hover:scale-105"
                     style={{
                         backgroundColor: projectColor || '#091590',
                         background: projectColor ? `linear-gradient(135deg, ${projectColor}, ${projectColor}dd)` : undefined,
@@ -178,7 +250,7 @@ export default function TasksPage() {
                 >
                     {initial}
                 </div>
-                <span className="font-medium text-gray-700 group-hover:text-blue-600 truncate text-xs">
+                <span className="font-medium text-gray-700 group-hover:text-blue-600 truncate text-xs transition-colors">
                     {projectName}
                 </span>
             </div>
@@ -313,12 +385,28 @@ export default function TasksPage() {
                 minWidth: 260,
                 pinned: 'left',
                 cellRenderer: TaskNameRenderer,
+                cellStyle: { cursor: 'pointer' },
+                onCellClicked: (params) => {
+                    if (params.data) {
+                        setTaskModalState({
+                            isOpen: true,
+                            taskId: params.data.id,
+                            projectId: params.data.projectId,
+                        });
+                    }
+                },
             },
             {
                 field: 'projectName',
                 headerName: 'PROJECT NAME',
                 width: 160,
                 cellRenderer: ProjectRenderer,
+                cellStyle: { cursor: 'pointer' },
+                onCellClicked: (params) => {
+                    if (params.data?.projectId) {
+                        router.push(`/projects/${params.data.projectId}`);
+                    }
+                },
             },
             {
                 field: 'tags',
@@ -361,7 +449,7 @@ export default function TasksPage() {
                 cellRenderer: DateRenderer,
             },
         ],
-        []
+        [router]
     );
 
     const defaultColDef = useMemo(
@@ -605,6 +693,19 @@ export default function TasksPage() {
                     </div>
                 )}
             </div>
+            {taskModalState.isOpen && taskModalState.projectId && taskModalState.taskId && (
+                <TaskModalWrapper
+                    isOpen={taskModalState.isOpen}
+                    onClose={() => setTaskModalState({ isOpen: false, taskId: null, projectId: null })}
+                    projectId={taskModalState.projectId}
+                    taskId={taskModalState.taskId}
+                    onTaskUpdated={() => refetch()}
+                    onTaskDeleted={() => {
+                        setTaskModalState({ isOpen: false, taskId: null, projectId: null });
+                        refetch();
+                    }}
+                />
+            )}
         </div>
     );
 }

@@ -185,6 +185,18 @@ export class MyTasksQueryDto {
   @Type(() => Number)
   @IsNumber()
   @Min(1)
-  @Max(50)
-  limit?: number = 20;
+  @Max(100)
+  limit?: number = 50;
+
+  @IsOptional()
+  @IsString()
+  search?: string;
+
+  @IsOptional()
+  @IsString()
+  statusId?: string;
+
+  @IsOptional()
+  @IsString()
+  projectId?: string;
 }
