@@ -290,20 +290,29 @@ export class TasksService {
 
     if (dto.search && dto.search.trim()) {
       const searchStr = dto.search.trim();
-      where.AND = [
-        {
-          OR: [
-            { title: { contains: searchStr, mode: 'insensitive' } },
-            { description: { contains: searchStr, mode: 'insensitive' } },
-            { taskId: { contains: searchStr, mode: 'insensitive' } },
-            { project: { name: { contains: searchStr, mode: 'insensitive' } } },
-            { status: { name: { contains: searchStr, mode: 'insensitive' } } },
-            { type: { contains: searchStr, mode: 'insensitive' } },
-            { assignees: { some: { user: { name: { contains: searchStr, mode: 'insensitive' } } } } },
-            { tags: { some: { tag: { name: { contains: searchStr, mode: 'insensitive' } } } } },
-          ],
-        },
+      const validTaskTypes = ['FEAT', 'BUG', 'IMPR', 'REF', 'RND', 'DOC', 'OPS', 'TEST', 'HOT'];
+      const matchedType = validTaskTypes.find(
+        (t) => t.toLowerCase() === searchStr.toLowerCase()
+      );
+
+      const searchConditions: any[] = [
+        { title: { contains: searchStr, mode: 'insensitive' } },
+        { description: { contains: searchStr, mode: 'insensitive' } },
+        { taskId: { contains: searchStr, mode: 'insensitive' } },
+        { project: { name: { contains: searchStr, mode: 'insensitive' } } },
+        { phase: { name: { contains: searchStr, mode: 'insensitive' } } },
+        { taskList: { name: { contains: searchStr, mode: 'insensitive' } } },
+        { status: { name: { contains: searchStr, mode: 'insensitive' } } },
+        { assignees: { some: { user: { name: { contains: searchStr, mode: 'insensitive' } } } } },
+        { assignees: { some: { user: { email: { contains: searchStr, mode: 'insensitive' } } } } },
+        { tags: { some: { tag: { name: { contains: searchStr, mode: 'insensitive' } } } } },
       ];
+
+      if (matchedType) {
+        searchConditions.push({ type: matchedType as any });
+      }
+
+      where.AND = [{ OR: searchConditions }];
     }
 
     const [total, tasks] = await this.prisma.$transaction([

@@ -446,18 +446,20 @@ export default function UserTasksPage() {
             });
         }
 
-        // 3. Search Query Filter across Title, Task ID, Description, Project Name, Status, Type, Assignees (Name/Email), Tags
+        // 3. Search Query Filter across Title, Task ID, Description, Project Name, Phase Name, Task List Name, Status, Type, Assignees (Name/Email), Tags
         if (searchQuery.trim()) {
             const q = searchQuery.toLowerCase().trim();
             result = result.filter((task) => {
-                if (task.title.toLowerCase().includes(q)) return true;
+                if (task.title && task.title.toLowerCase().includes(q)) return true;
                 if (task.taskId && task.taskId.toLowerCase().includes(q)) return true;
                 if (task.description && task.description.toLowerCase().includes(q)) return true;
                 if (task.projectName && task.projectName.toLowerCase().includes(q)) return true;
+                if (task.phaseName && task.phaseName.toLowerCase().includes(q)) return true;
+                if (task.taskListName && task.taskListName.toLowerCase().includes(q)) return true;
                 if (task.status?.name && task.status.name.toLowerCase().includes(q)) return true;
                 if (task.type && task.type.toLowerCase().includes(q)) return true;
-                if (task.assignees.some((a) => a.name.toLowerCase().includes(q) || (a.email && a.email.toLowerCase().includes(q)))) return true;
-                if (task.tags.some((tag) => tag.name.toLowerCase().includes(q))) return true;
+                if (task.assignees && task.assignees.some((a) => (a.name && a.name.toLowerCase().includes(q)) || (a.email && a.email.toLowerCase().includes(q)))) return true;
+                if (task.tags && task.tags.some((tag) => (tag.name && tag.name.toLowerCase().includes(q)))) return true;
                 return false;
             });
         }
