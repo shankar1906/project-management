@@ -1256,7 +1256,7 @@ function TaskNameCell(params: ICellRendererParams) {
                 <div className="w-6 h-6 rounded bg-indigo-500 flex items-center justify-center mr-2 flex-shrink-0 shadow-sm">
                     <Layers className="w-3.5 h-3.5 text-white" />
                 </div>
-                <span className="font-bold text-sm text-gray-800 truncate uppercase tracking-wide flex-1 min-w-0" title={row.name}>
+                <span className="font-bold text-xs text-gray-800 truncate uppercase tracking-wide flex-1 min-w-0" title={row.name}>
                     {row.name.length > 20 ? row.name.substring(0, 20) + '...' : row.name}
                 </span>
                 {ctx.isEditable && (
@@ -1303,7 +1303,7 @@ function TaskNameCell(params: ICellRendererParams) {
                 <div className="w-6 h-6 rounded bg-emerald-500 flex items-center justify-center mr-2 flex-shrink-0 shadow-sm">
                     <ListTodo className="w-3.5 h-3.5 text-white" />
                 </div>
-                <span className="font-semibold text-sm text-gray-700 truncate flex-1 min-w-0" title={row.name}>
+                <span className="font-semibold text-xs text-gray-700 truncate flex-1 min-w-0" title={row.name}>
                     {row.name.length > 60 ? row.name.substring(0, 60) + '...' : row.name}
                 </span>
                 {row.childCount !== undefined && (
@@ -1387,7 +1387,7 @@ function TaskNameCell(params: ICellRendererParams) {
 
             <span
                 className={cn(
-                    "text-sm truncate flex-1 min-w-0",
+                    "text-xs truncate flex-1 min-w-0",
                     row.rowType === 'subtask' ? 'text-gray-500' : 'text-gray-800 font-medium'
                 )}
                 title={row.name}
