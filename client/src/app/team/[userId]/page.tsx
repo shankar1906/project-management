@@ -22,11 +22,12 @@ import {
     ExternalLink,
     X,
 } from 'lucide-react';
+import { useQueries } from '@tanstack/react-query';
 import { useTeams } from '@/hooks/use-teams';
-import { useUserTasks } from '@/hooks/use-tasks';
+import { useUserTasks, taskKeys, useProjectWorkflow } from '@/hooks/use-tasks';
 import { useStructuredPhases } from '@/hooks/use-phases';
-import { useProjectMembers } from '@/hooks/use-projects';
-import { taskService } from '@/services/tasks.service';
+import { useProjectMembers, useProjects } from '@/hooks/use-projects';
+import { taskService, workflowService } from '@/services/tasks.service';
 import { Avatar } from '@/components/ui/Avatar';
 import { Loader } from '@/components/ui/Loader';
 import { TaskViewModal } from '@/components/tasks/TaskViewModal';
@@ -261,6 +262,7 @@ function TaskModalWrapper({
 }) {
     const { data: phases = [] } = useStructuredPhases(projectId);
     const { data: members = [] } = useProjectMembers(projectId);
+    const { data: workflow = [] } = useProjectWorkflow(projectId);
 
     return (
         <TaskViewModal
@@ -269,7 +271,7 @@ function TaskModalWrapper({
             projectId={projectId}
             phases={phases}
             selectedTaskId={taskId}
-            workflow={[]}
+            workflow={workflow}
             members={members}
             onUpdateTask={async (tId, data) => {
                 await taskService.updateTask(tId, data);
@@ -314,25 +316,69 @@ export default function UserTasksPage() {
     const { data: userTasksData, isLoading, refetch } = useUserTasks(userId, {
         limit: 100,
         search: searchQuery || undefined,
-        statusId: selectedStatusFilter !== 'ALL' ? selectedStatusFilter : undefined,
     });
 
     const rawTasks: MyTask[] = userTasksData?.data || [];
 
-    // Extract unique status options for dropdown filter
+    // Collect project IDs from user's tasks to fetch workflows via GET /projects/:projectId/workflow
+    const projectIds = useMemo(() => {
+        const ids = new Set<string>();
+        rawTasks.forEach((t) => { if (t.projectId) ids.add(t.projectId); });
+        return Array.from(ids);
+    }, [rawTasks]);
+
+    const workflowQueries = useQueries({
+        queries: projectIds.map((pId) => ({
+            queryKey: taskKeys.workflow(pId),
+            queryFn: () => workflowService.getWorkflow(pId),
+            enabled: !!pId,
+            staleTime: 60 * 1000,
+        })),
+    });
+
+    // Extract unique status options (deduplicated by status NAME to remove duplicate entries across projects)
     const statusOptions = useMemo(() => {
-        const map = new Map<string, { id: string; name: string; color: string }>();
+        const map = new Map<string, { id: string; name: string; color: string; ids: Set<string> }>();
+
+        const addStatus = (id: string, name: string, color?: string) => {
+            if (!name || !name.trim()) return;
+            const key = name.trim().toLowerCase();
+            if (!map.has(key)) {
+                map.set(key, {
+                    id: id || key,
+                    name: name.trim(),
+                    color: color || '#64748b',
+                    ids: new Set(id ? [id] : []),
+                });
+            } else {
+                const existing = map.get(key)!;
+                if (id) existing.ids.add(id);
+                if (color && color !== '#64748b') existing.color = color;
+            }
+        };
+
+        // 1. Add statuses from user's tasks
         rawTasks.forEach((t) => {
-            if (t.status?.id && !map.has(t.status.id)) {
-                map.set(t.status.id, {
-                    id: t.status.id,
-                    name: t.status.name,
-                    color: t.status.color || '#64748b',
+            if (t.status?.name) {
+                addStatus(t.status.id, t.status.name, t.status.color);
+            }
+        });
+
+        // 2. Add workflow statuses from project workflows (GET /projects/:projectId/workflow)
+        workflowQueries.forEach((q) => {
+            if (q.data && Array.isArray(q.data)) {
+                q.data.forEach((stage: any) => {
+                    if (stage.statuses && Array.isArray(stage.statuses)) {
+                        stage.statuses.forEach((st: any) => {
+                            addStatus(st.id, st.name, st.color);
+                        });
+                    }
                 });
             }
         });
+
         return Array.from(map.values());
-    }, [rawTasks]);
+    }, [workflowQueries, rawTasks]);
 
     // Comprehensive client filtering (Search + Date + Status)
     const filteredTasks = useMemo(() => {
@@ -340,7 +386,18 @@ export default function UserTasksPage() {
 
         // 1. Status Filter
         if (selectedStatusFilter !== 'ALL') {
-            result = result.filter((task) => task.status?.id === selectedStatusFilter);
+            const selectedOpt = statusOptions.find(
+                (s) => s.id === selectedStatusFilter || s.name.toLowerCase() === selectedStatusFilter.toLowerCase()
+            );
+            if (selectedOpt) {
+                result = result.filter(
+                    (task) =>
+                        (task.status?.id && selectedOpt.ids.has(task.status.id)) ||
+                        (task.status?.name && task.status.name.trim().toLowerCase() === selectedOpt.name.toLowerCase())
+                );
+            } else {
+                result = result.filter((task) => task.status?.id === selectedStatusFilter);
+            }
         }
 
         // 2. Date Filter
